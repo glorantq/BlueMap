@@ -53,7 +53,9 @@ public class BlockEntity {
     private static final Map<String, BlockEntityInitializer> ID_MAPPING = Map.of(
             "minecraft:sign", SignBlockEntity::new,
             "minecraft:skull", SkullBlockEntity::new,
-            "minecraft:banner", BannerBlockEntity::new
+            "minecraft:banner", BannerBlockEntity::new,
+            // Domum Ornamentum
+            "domum_ornamentum:materially_retexturable", MateriallyRetexturableBlockEntity::new
     );
 
     protected final String id;

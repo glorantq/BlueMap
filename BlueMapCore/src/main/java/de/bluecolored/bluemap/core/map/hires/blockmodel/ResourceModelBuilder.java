@@ -28,6 +28,9 @@ import com.flowpowered.math.TrigMath;
 import com.flowpowered.math.vector.Vector3f;
 import com.flowpowered.math.vector.Vector3i;
 import com.flowpowered.math.vector.Vector4f;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import de.bluecolored.bluemap.core.map.TextureGallery;
 import de.bluecolored.bluemap.core.map.hires.BlockModelView;
 import de.bluecolored.bluemap.core.map.hires.TileModel;
@@ -38,7 +41,8 @@ import de.bluecolored.bluemap.core.resources.resourcepack.ResourcePack;
 import de.bluecolored.bluemap.core.resources.resourcepack.blockmodel.BlockModel;
 import de.bluecolored.bluemap.core.resources.resourcepack.blockmodel.Element;
 import de.bluecolored.bluemap.core.resources.resourcepack.blockmodel.Face;
-import de.bluecolored.bluemap.core.resources.resourcepack.blockstate.Variant;
+import de.bluecolored.bluemap.core.resources.resourcepack.blockmodel.TextureVariable;
+import de.bluecolored.bluemap.core.resources.resourcepack.blockstate.*;
 import de.bluecolored.bluemap.core.resources.resourcepack.texture.Texture;
 import de.bluecolored.bluemap.core.util.Direction;
 import de.bluecolored.bluemap.core.util.math.Color;
@@ -49,6 +53,14 @@ import de.bluecolored.bluemap.core.world.BlockProperties;
 import de.bluecolored.bluemap.core.world.LightData;
 import de.bluecolored.bluemap.core.world.block.BlockNeighborhood;
 import de.bluecolored.bluemap.core.world.block.ExtendedBlock;
+import de.bluecolored.bluemap.core.world.block.entity.BlockEntity;
+import de.bluecolored.bluemap.core.world.block.entity.MateriallyRetexturableBlockEntity;
+import org.checkerframework.checker.nullness.qual.NonNull;
+import org.checkerframework.checker.nullness.qual.Nullable;
+
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * This model builder creates a BlockStateModel using the information from parsed resource-pack json files.
@@ -56,6 +68,48 @@ import de.bluecolored.bluemap.core.world.block.ExtendedBlock;
 @SuppressWarnings("DuplicatedCode")
 public class ResourceModelBuilder {
     private static final float BLOCK_SCALE = 1f / 16f;
+
+    // Domum Ornamentum: Load and cache textures for a given block key
+    private final LoadingCache<String, ResourcePath<Texture>> blockTextureCache = Caffeine.newBuilder()
+            .maximumSize(256)
+            .initialCapacity(32)
+            .expireAfterAccess(15, TimeUnit.MINUTES)
+            .build(new CacheLoader<>() {
+                @Override
+                public @Nullable ResourcePath<Texture> load(@NonNull String key) {
+                    BlockState newState =
+                            resourcePack.getBlockState(new ResourcePath<>(key));
+
+                    List<VariantSet> variantSets = new ArrayList<>();
+
+                    if (newState != null) {
+                        Variants variants = newState.getVariants();
+                        if (variants != null) {
+                            variantSets.add(variants.getDefaultVariant());
+                            variantSets.addAll(Arrays.stream(variants.getVariants()).toList());
+                        }
+
+                        Multipart multipart = newState.getMultipart();
+                        if (multipart != null) {
+                            variantSets.addAll(Arrays.stream(multipart.getParts()).toList());
+                        }
+                    }
+
+                    Optional<TextureVariable> maybeTextureVariable = variantSets.stream()
+                            .filter(Objects::nonNull)
+                            .flatMap(it -> Arrays.stream(it.getVariants()))
+                            .map(Variant::getModel)
+                            .filter(Objects::nonNull)
+                            .map(resourcePack::getBlockModel)
+                            .filter(Objects::nonNull)
+                            .flatMap(it -> it.getTextures().values().stream())
+                            .findFirst();
+
+                    return maybeTextureVariable
+                            .map(TextureVariable::getTexturePath)
+                            .orElse(Texture.MISSING.getResourcePath());
+                }
+            });
 
     private final ResourcePack resourcePack;
     private final TextureGallery textureGallery;
@@ -233,6 +287,24 @@ public class ResourceModelBuilder {
 
         // ####### texture
         ResourcePath<Texture> texturePath = face.getTexture().getTexturePath(modelResource.getTextures()::get);
+
+        // Domum Ornamentum: Support for "materially textured blocks"
+        BlockEntity blockEntity = block.getBlockEntity();
+        if (texturePath != null) {
+            if (blockEntity instanceof MateriallyRetexturableBlockEntity retexturableBlockEntity) {
+                Map<String, String> textureData = retexturableBlockEntity.getTextureData();
+
+                String replacementBlock = textureData.getOrDefault(texturePath.toString(), "");
+                if (!replacementBlock.isBlank()) {
+                    ResourcePath<Texture> replacementTexture = blockTextureCache.get(replacementBlock);
+
+                    if (replacementTexture != null) {
+                        texturePath = replacementTexture;
+                    }
+                }
+            }
+        }
+
         int textureId = textureGallery.get(texturePath);
         tileModel.setMaterialIndex(face1, textureId);
         tileModel.setMaterialIndex(face2, textureId);
